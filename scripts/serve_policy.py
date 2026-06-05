@@ -1,6 +1,7 @@
 import dataclasses
 import enum
 import logging
+import pathlib
 import socket
 
 import tyro
@@ -18,6 +19,7 @@ class EnvMode(enum.Enum):
     ALOHA_SIM = "aloha_sim"
     DROID = "droid"
     LIBERO = "libero"
+    ROBOMIMIC = "robomimic"
 
 
 @dataclasses.dataclass
@@ -73,6 +75,10 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
         config="pi05_libero",
         dir="gs://openpi-assets/checkpoints/pi05_libero",
     ),
+    EnvMode.ROBOMIMIC: Checkpoint(
+        config="pi0_robomimic_square_ph_image_lora",
+        dir="checkpoints/pi0_robomimic_square_ph_image_lora/robomimic",
+    ),
 }
 
 
@@ -80,7 +86,9 @@ def create_default_policy(env: EnvMode, *, default_prompt: str | None = None) ->
     """Create a default policy for the given environment."""
     if checkpoint := DEFAULT_CHECKPOINT.get(env):
         return _policy_config.create_trained_policy(
-            _config.get_config(checkpoint.config), checkpoint.dir, default_prompt=default_prompt
+            _config.get_config(checkpoint.config),
+            _resolve_checkpoint_dir(checkpoint.dir),
+            default_prompt=default_prompt,
         )
     raise ValueError(f"Unsupported environment mode: {env}")
 
@@ -90,10 +98,35 @@ def create_policy(args: Args) -> _policy.Policy:
     match args.policy:
         case Checkpoint():
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                _config.get_config(args.policy.config),
+                _resolve_checkpoint_dir(args.policy.dir),
+                default_prompt=args.default_prompt,
             )
         case Default():
             return create_default_policy(args.env, default_prompt=args.default_prompt)
+
+
+def _resolve_checkpoint_dir(checkpoint_dir: str) -> str:
+    """Resolve checkpoint-manager roots like .../robomimic to their latest numeric step."""
+    if "://" in checkpoint_dir:
+        return checkpoint_dir
+
+    path = pathlib.Path(checkpoint_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint path does not exist: {path}")
+    if (path / "params").exists():
+        return str(path)
+
+    step_dirs = sorted(
+        (child for child in path.iterdir() if child.is_dir() and child.name.isdigit()),
+        key=lambda child: int(child.name),
+    )
+    if not step_dirs:
+        return str(path)
+
+    resolved = step_dirs[-1]
+    logging.info("Resolved checkpoint root %s -> latest step %s", path, resolved)
+    return str(resolved)
 
 
 def main(args: Args) -> None:

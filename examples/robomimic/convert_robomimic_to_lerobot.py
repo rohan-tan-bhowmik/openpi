@@ -61,6 +61,7 @@ def main(
     robot_type: str = "franka",
     overwrite: bool = False,
     push_to_hub: bool = False,
+    max_episodes: int | None = None,
 ) -> None:
     input_path = Path(input_hdf5)
     if not input_path.exists():
@@ -91,6 +92,7 @@ def main(
             raise KeyError(f"Demo {demo_keys[0]} is missing 'actions'.")
 
         first_obs = first_demo["obs"]
+        action_dim = first_demo["actions"].shape[1]
 
         image_key = _find_first_existing(
             first_obs,
@@ -132,20 +134,20 @@ def main(
             },
             "actions": {
                 "dtype": "float32",
-                "shape": (7,),
+                "shape": (action_dim,),
                 "names": ["actions"],
             },
         }
 
         if image_shape is not None:
-            features["agentview_image"] = {
+            features["image"] = {
                 "dtype": "image",
                 "shape": image_shape,
                 "names": ["height", "width", "channel"],
             }
 
         if wrist_image_shape is not None:
-            features["robot0_eye_in_hand_image"] = {
+            features["wrist_image"] = {
                 "dtype": "image",
                 "shape": wrist_image_shape,
                 "names": ["height", "width", "channel"],
@@ -168,6 +170,8 @@ def main(
     # -------- Second pass: convert all demos --------
     with h5py.File(input_path, "r") as f:
         demo_keys = sorted(f["data"].keys())
+        if max_episodes is not None:
+            demo_keys = demo_keys[:max_episodes]
 
         for demo_key in demo_keys:
             demo = f["data"][demo_key]
@@ -190,7 +194,7 @@ def main(
             image_seq = None
             wrist_image_seq = None
 
-            if "agentview_image" in features:
+            if "image" in features:
                 # Re-find key per demo for robustness.
                 demo_image_key = _find_first_existing(
                     obs,
@@ -200,7 +204,7 @@ def main(
                     raise KeyError(f"Demo {demo_key} is missing main image key")
                 image_seq = _as_uint8_image(obs[demo_image_key][:])
 
-            if "robot0_eye_in_hand_image" in features:
+            if "wrist_image" in features:
                 demo_wrist_key = _find_first_existing(
                     obs,
                     ["robot0_eye_in_hand_image", "eye_in_hand_image"],
@@ -217,10 +221,10 @@ def main(
                 }
 
                 if image_seq is not None:
-                    frame["agentview_image"] = image_seq[t]
+                    frame["image"] = image_seq[t]
 
                 if wrist_image_seq is not None:
-                    frame["robot0_eye_in_hand_image"] = wrist_image_seq[t]
+                    frame["wrist_image"] = wrist_image_seq[t]
                     
                 dataset.add_frame(frame)
                 num_frames += 1

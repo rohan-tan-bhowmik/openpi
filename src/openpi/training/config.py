@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.robomimic_policy as robomimic_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -356,53 +357,18 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
-import numpy as np
-
-class TensorImagesToNumpy:
-    def __call__(self, data):
-        if "image" in data:
-            converted = {}
-            for k, v in data["image"].items():
-                if hasattr(v, "detach"):
-                    v = v.detach().cpu().numpy()
-                else:
-                    v = np.asarray(v)
-
-                if v.ndim == 3:
-                    if v.shape[0] in (1, 3):
-                        v = np.transpose(v, (1, 2, 0))
-
-                if v.ndim == 4:
-                    if v.shape[1] in (1, 3):
-                        v = np.transpose(v, (0, 2, 3, 1))
-
-                if v.dtype != np.uint8:
-                    v = np.clip(v, 0, 1)
-                    v = (v * 255).astype(np.uint8)
-
-                converted[k] = v
-
-            data["image"] = converted
-        return data
-
-class AddImageMask:
-    def __call__(self, data):
-        if "image" in data and "image_mask" not in data:
-            data["image_mask"] = {k: True for k in data["image"].keys()}
-        return data
-
 @dataclasses.dataclass(frozen=True)
 class RoboMimicDataConfig(DataConfigFactory):
     default_prompt: str | None = None
-    use_delta_actions: bool = True
+    use_delta_actions: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         data_transforms = _transforms.Group(
             inputs=[
-                TensorImagesToNumpy(),
-                AddImageMask(),
-            ]
+                robomimic_policy.RoboMimicInputs(model_type=model_config.model_type),
+            ],
+            outputs=[robomimic_policy.RoboMimicOutputs()],
         )
 
         if self.use_delta_actions:
@@ -420,12 +386,9 @@ class RoboMimicDataConfig(DataConfigFactory):
                 inputs=[
                     _transforms.RepackTransform(
                         {
-                            "image": {
-                                "base_0_rgb": "agentview_image",
-                                "left_wrist_0_rgb": "robot0_eye_in_hand_image",
-                                "right_wrist_0_rgb": "robot0_eye_in_hand_image",
-                            },
-                            "state": "state",
+                            "observation/image": "image",
+                            "observation/wrist_image": "wrist_image",
+                            "observation/state": "state",
                             "actions": "actions",
                             "prompt": "task",
                         }
@@ -1063,6 +1026,8 @@ _CONFIGS = [
     , TrainConfig(
         name="pi0_robomimic_square_ph_image_lora",
         model=pi0_config.Pi0Config(
+            pi05=True, # technically pi05
+            action_horizon=10,
             action_dim=32,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
@@ -1073,9 +1038,87 @@ _CONFIGS = [
             default_prompt="insert the peg into the square hole",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi0_base/params"         
+            "gs://openpi-assets/checkpoints/pi05_base/params"
         ),
         num_train_steps=10000,
+        batch_size=32,
+        freeze_filter=pi0_config.Pi0Config(
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    )
+    , TrainConfig(
+        name="pi0_robomimic_square_ph_image_lora_30ep",
+        model=pi0_config.Pi0Config(
+            pi05=True, # technically pi05
+            action_horizon=10,
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=RoboMimicDataConfig(
+            repo_id="rbhowmik/robomimic_square_30ep",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="insert the peg into the square hole",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        num_train_steps=5000,  # ~15 epochs (30 eps, 4389 frames, batch 32 → 137 steps/epoch)
+        batch_size=32,
+        freeze_filter=pi0_config.Pi0Config(
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    )
+    , TrainConfig(
+        name="pi0_robomimic_square_ph_image_lora_100ep_random_post",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=RoboMimicDataConfig(
+            repo_id="rbhowmik/robomimic_square_100ep_random_post",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="insert the peg into the square hole",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        num_train_steps=60000,  # ~100 epochs (100 eps, 19060 frames, batch 32 → 596 steps/epoch)
+        batch_size=32,
+        freeze_filter=pi0_config.Pi0Config(
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    )
+    , TrainConfig(
+        name="pi0_robomimic_square_ph_image_lora_combined_grasp",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=RoboMimicDataConfig(
+            repo_id="rbhowmik/robomimic_square_combined_grasp",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="insert the peg into the square hole",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        num_train_steps=24000,  # ~18 epochs (200 eps, 43506 frames, batch 32 → 1360 steps/epoch)
         batch_size=32,
         freeze_filter=pi0_config.Pi0Config(
             action_dim=32,
